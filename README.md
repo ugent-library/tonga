@@ -10,3 +10,5 @@ Postgres based message queue
 * add support for unlogged queues
 * add metrics
 * add batch
+* add Go client
+* add Perl client

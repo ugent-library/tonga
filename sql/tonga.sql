@@ -12,11 +12,11 @@ create type tonga_message as (
 create table tonga_channels (
     queue_name text unique not null,
     topic ltree not null,
-    expires_at timestamptz
+    delete_at timestamptz
 );
 
 create index tonga_channels_topic_gist_idx on tonga_channels using gist (topic);
-create index tonga_channels_topic_expires_at_idx on tonga_channels (expires_at);
+create index tonga_channels_topic_delete_at_idx on tonga_channels (delete_at);
 
 create function _tonga_table(queue_name text, prefix text)
 returns text as $$
@@ -44,7 +44,7 @@ begin
 end;
 $$ language plpgsql;
 
-create function tonga_add_channel(queue_name text, topic ltree, expires_after interval = null)
+create function tonga_create_channel(queue_name text, topic ltree, delete_after interval = null)
 returns void as $$
 declare
     _q_table text = _tonga_table(queue_name, 'tonga_q_');
@@ -66,12 +66,12 @@ begin
 
     execute format('create index if not exists %I on %I (deliver_at);', _q_table || '_deliver_at_idx', _q_table);
 
-    -- TODO should check topic is same
-    insert into tonga_channels (queue_name, topic, expires_at)
+    -- TODO should check topic and delete_at is same
+    insert into tonga_channels (queue_name, topic, delete_at)
     values (
-        tonga_add_channel.queue_name,
-        tonga_add_channel.topic,
-        (case when expires_after is not null then clock_timestamp() + tonga_add_channel.expires_after
+        tonga_create_channel.queue_name,
+        tonga_create_channel.topic,
+        (case when delete_after is not null then now() + tonga_create_channel.delete_after
          else null
          end)
     )
@@ -79,14 +79,14 @@ begin
 end;
 $$ language plpgsql;
 
-create function tonga_remove_channel(queue_name text)
+create function tonga_delete_channel(queue_name text)
 returns void as $$
 declare
     _q_table text = _tonga_queue_table(queue_name);
 begin
     execute format('drop table if exists %I;', _q_table);
 
-    delete from tonga_channels where queue_name = tonga_remove_channel.queue_name;
+    delete from tonga_channels where queue_name = tonga_delete_channel.queue_name;
 end
 $$ language plpgsql;
 
@@ -99,7 +99,7 @@ begin
     for _rec in 
         select c.queue_name
         from tonga_channels c
-        where c.topic @> tonga_send.topic and (c.expires_at is null or c.expires_at > now())
+        where c.topic @> tonga_send.topic and (c.delete_at is null or c.delete_at > now())
     loop
         _q = _tonga_queue_table(_rec.queue_name);
         execute format('insert into %I (topic, body, deliver_at) values ($1, $2, $3);', _q)
@@ -108,7 +108,7 @@ begin
 end
 $$ language plpgsql;
 
--- TODO return or error if expired
+-- TODO return or error if deleted
 create function tonga_read(queue_name text, hide_for interval, quantity int = 1)
 returns setof tonga_message as $$
 declare
@@ -158,7 +158,7 @@ declare
 begin
     for _rec in 
         delete from tonga_channels
-		where expires_at is not null and expires_at <= now()
+		where delete_at is not null and delete_at <= now()
         returning queue_name
     loop
         execute format('drop table %I;', _tonga_queue_table(_rec.queue_name));

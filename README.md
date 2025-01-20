@@ -7,7 +7,6 @@ Postgres based message queue
 * add pop
 * add poll
 * add count
-* add support for unlogged queues
 * add metrics
 * add batch
 * add Go client

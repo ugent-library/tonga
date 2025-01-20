@@ -12,6 +12,7 @@ create type tonga_message as (
 create table tonga_channels (
     queue_name text unique not null,
     topic ltree not null,
+    unlogged boolean not null,
     delete_at timestamptz
 );
 
@@ -44,25 +45,46 @@ begin
 end;
 $$ language plpgsql;
 
-create function tonga_create_channel(queue_name text, topic ltree, delete_after interval = null)
+create function tonga_create_channel(
+    queue_name text,
+    topic ltree,
+    delete_after interval = null,
+    unlogged boolean = false
+)
 returns void as $$
 declare
     _q_table text = _tonga_table(queue_name, 'tonga_q_');
+    _q text;
 begin
     perform _tonga_validate_queue_name(queue_name);
 
-    execute format(
-        $QUERY$
-        create table if not exists %I (
-            id bigint primary key generated always as identity,
-            topic ltree not null,
-            body jsonb not null,
-            created_at timestamptz not null default now(),
-            deliver_at timestamptz not null default now()
-        )
-        $QUERY$,
-        _q_table
-    );
+    if unlogged then
+        execute format(
+            $QUERY$
+            create unlogged table if not exists %I (
+                id bigint primary key generated always as identity,
+                topic ltree not null,
+                body jsonb not null,
+                created_at timestamptz not null default now(),
+                deliver_at timestamptz not null default now()
+            )
+            $QUERY$,
+            _q_table
+        );
+    else
+        execute format(
+            $QUERY$
+            create table if not exists %I (
+                id bigint primary key generated always as identity,
+                topic ltree not null,
+                body jsonb not null,
+                created_at timestamptz not null default now(),
+                deliver_at timestamptz not null default now()
+            )
+            $QUERY$,
+            _q_table
+        );
+    end if;    
 
     execute format('create index if not exists %I on %I (deliver_at);', _q_table || '_deliver_at_idx', _q_table);
 
@@ -71,6 +93,7 @@ begin
     values (
         tonga_create_channel.queue_name,
         tonga_create_channel.topic,
+        tonga_create_channel.unlogged,
         (case when delete_after is not null then now() + tonga_create_channel.delete_after
          else null
          end)

@@ -89,7 +89,7 @@ begin
     execute format('create index if not exists %I on %I (deliver_at);', _q_table || '_deliver_at_idx', _q_table);
 
     -- TODO should check topic and delete_at is same
-    insert into tonga_channels (queue_name, topic, delete_at)
+    insert into tonga_channels (queue_name, topic, unlogged, delete_at)
     values (
         tonga_create_channel.queue_name,
         tonga_create_channel.topic,

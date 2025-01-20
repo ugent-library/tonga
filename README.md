@@ -3,6 +3,7 @@ Postgres based message queue
 
 ## Roadmap
 
+* add send with delay
 * add peek
 * add pop
 * add poll

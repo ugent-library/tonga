@@ -90,7 +90,7 @@ begin
 end
 $$ language plpgsql;
 
-create function tonga_send(topic ltree, body jsonb)
+create function tonga_send(topic ltree, body jsonb, deliver_at timestamptz = now())
 returns void as $$
 declare
     _rec record;
@@ -102,8 +102,8 @@ begin
         where c.topic @> tonga_send.topic and (c.expires_at is null or c.expires_at > now())
     loop
         _q = _tonga_queue_table(_rec.queue_name);
-        execute format('insert into %I (topic, body) values ($1, $2);', _q)
-        using tonga_send.topic, tonga_send.body;
+        execute format('insert into %I (topic, body, deliver_at) values ($1, $2, $3);', _q)
+        using tonga_send.topic, tonga_send.body, tonga_send.deliver_at;
     end loop;
 end
 $$ language plpgsql;

@@ -2,7 +2,9 @@ package Tonga::DBI;
 
 use strict;
 use warnings;
+use JSON::MaybeXS qw(encode_json decode_json);
 use Moo;
+use namespace::clean;
 
 has dbh => (
     is       => 'ro',
@@ -11,9 +13,9 @@ has dbh => (
 );
 
 sub create_channel {
-    my ($self, $queue_name, %opts) = @_;
-    my $sth = $dbh->prepare('select * from tonga_create_channel(queue_name => ?, delete_after => ?, unlogged => ?);');
-    $sth->execute($queue_name, $opts{delete_after}, $opts{unlogged} ? 1 : 0);
+    my ($self, $queue_name, $topic, %opts) = @_;
+    my $sth = $dbh->prepare('select * from tonga_create_channel(queue_name => ?, topic => ?, delete_at => ?, unlogged => ?);');
+    $sth->execute($queue_name, $topic, $opts{delete_at}, $opts{unlogged} ? 1 : 0);
 }
 
 sub delete_channel {
@@ -27,14 +29,18 @@ sub delete_channel {
 sub send {
     my ($self, $topic, $body, %opts) = @_;
     my $sth = $dbh->prepare('select * from tonga_send(topic => ?, body => ?, deliver_at => ?);');
-    $sth->execute($topic, $body, $opts{deliver_at});
+    $sth->execute($topic, encode_json($body), $opts{deliver_at});
 }
 
 sub read {
     my ($self, $queue_name, $hide_for, $quantity) = @_;
-    my $sth = $dbh->prepare('select * from tonga_read(queue_name => ?, hide_for => ?, quantity => ?);');
+    my $sth = $dbh->prepare('select * from tonga_read(queue_name => ?, quantity => ?, hide_for => ?);');
     $sth->execute($queue_name, $hide_for, $quantity);
-    return $sth->fetchall_arrayref({});
+    my $msgs = $sth->fetchall_arrayref({});
+    for my $msg (@$msgs) {
+        $msg->{body} = decode_json($msg->{body});
+    }
+    return $msgs;
 }
 
 sub delete {

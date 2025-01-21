@@ -48,7 +48,7 @@ $$ language plpgsql;
 create function tonga_create_channel(
     queue_name text,
     topic ltree,
-    delete_after interval = null,
+    delete_at timeastamptz = null,
     unlogged boolean = false
 )
 returns void as $$
@@ -94,9 +94,7 @@ begin
         tonga_create_channel.queue_name,
         tonga_create_channel.topic,
         tonga_create_channel.unlogged,
-        (case when delete_after is not null then now() + tonga_create_channel.delete_after
-         else null
-         end)
+        tonga_create_channel.delete_at
     )
     on conflict do nothing;
 end;
@@ -139,7 +137,7 @@ end
 $$ language plpgsql;
 
 -- TODO return or error if deleted
-create function tonga_read(queue_name text, hide_for interval, quantity int)
+create function tonga_read(queue_name text, quantity int, hide_for int)
 returns setof tonga_message as $$
 declare
     _q_table text = _tonga_queue_table(queue_name);
@@ -152,11 +150,11 @@ begin
 			from %I
 			where deliver_at <= clock_timestamp()
 			order by id asc
-			limit $2
+			limit $1
 			for update skip locked
 		)
 		update %I m
-		set deliver_at = clock_timestamp() + $1
+		set deliver_at = clock_timestamp() + $2
 		from msgs
 		where m.id = msgs.id
 		returning m.id, m.topic, m.body, m.created_at, m.deliver_at;
@@ -164,7 +162,7 @@ begin
         _q_table,
         _q_table
     );
-    return query execute _q using tonga_read.hide_for, tonga_read.quantity;
+    return query execute _q using tonga_read.quantity, make_interval(secs => tonga_read.hide_for);
 end
 $$ language plpgsql;
 

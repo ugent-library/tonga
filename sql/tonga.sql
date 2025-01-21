@@ -103,19 +103,26 @@ end;
 $$ language plpgsql;
 
 create function tonga_delete_channel(queue_name text)
-returns void as $$
+returns boolean as $$
 declare
     _q_table text = _tonga_queue_table(queue_name);
+    _res boolean;
 begin
     execute format('drop table if exists %I;', _q_table);
 
-    delete from tonga_channels where queue_name = tonga_delete_channel.queue_name;
+    delete from tonga_channels c
+    where c.queue_name = tonga_delete_channel.queue_name
+    returning true
+    into _res;
+    
+    return coalesce(_res, false);
 end
 $$ language plpgsql;
 
-create function tonga_send(topic ltree, body jsonb, deliver_at timestamptz = now())
+create function tonga_send(topic ltree, body jsonb, deliver_at timestamptz = null)
 returns void as $$
 declare
+    _deliver_at timestamptz = coalesce(tonga_send.deliver_at, now());
     _rec record;
     _q text;
 begin
@@ -126,13 +133,13 @@ begin
     loop
         _q = _tonga_queue_table(_rec.queue_name);
         execute format('insert into %I (topic, body, deliver_at) values ($1, $2, $3);', _q)
-        using tonga_send.topic, tonga_send.body, tonga_send.deliver_at;
+        using tonga_send.topic, tonga_send.body, _deliver_at;
     end loop;
 end
 $$ language plpgsql;
 
 -- TODO return or error if deleted
-create function tonga_read(queue_name text, hide_for interval, quantity int = 1)
+create function tonga_read(queue_name text, hide_for interval, quantity int)
 returns setof tonga_message as $$
 declare
     _q_table text = _tonga_queue_table(queue_name);
@@ -170,7 +177,7 @@ begin
     execute format('delete from %I where id = $1 returning true;', _q_table)
     using tonga_delete.id
     into _res;
-    return _res;
+    return coalesce(_res, false);
 end;
 $$ language plpgsql;
 

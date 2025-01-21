@@ -11,4 +11,5 @@ Postgres based message queue
 * add metrics
 * add batch
 * add Go client
-* add Perl client
+* cap delivery attempts?
+* message archiving?

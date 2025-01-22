@@ -130,7 +130,7 @@ end
 $$ language plpgsql;
 
 -- TODO return or error if deleted
-create function tonga_read(queue_name text, quantity int, hide_for int)
+create function tonga_read(queue_name text, quantity int = 1, hide_for int = 30)
 returns setof tonga_message as $$
 declare
     _q_table text = _tonga_queue_table(queue_name);

@@ -41,7 +41,7 @@ $$ language plpgsql;
 create function tonga_create_channel(
     queue_name text,
     topic ltree,
-    delete_at timeastamptz = null,
+    delete_at timestamptz = null,
     unlogged boolean = false
 )
 returns void as $$

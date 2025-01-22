@@ -19,20 +19,13 @@ create table tonga_channels (
 create index tonga_channels_topic_gist_idx on tonga_channels using gist (topic);
 create index tonga_channels_topic_delete_at_idx on tonga_channels (delete_at);
 
-create function _tonga_table(queue_name text, prefix text)
+create function _tonga_queue_table(queue_name text)
 returns text as $$
 begin
     if queue_name ~ '\$|;|--|''' then
         raise exception 'tonga: queue name contains invalid characters $, ;, --, or \''';
     end if;
-    return lower(prefix || queue_name);
-end;
-$$ language plpgsql;
-
-create function _tonga_queue_table(queue_name text)
-returns text as $$
-begin
-    return _tonga_table(queue_name, 'tonga_q_');
+    return 'tonga_q_' || lower(queue_name);
 end;
 $$ language plpgsql;
 
@@ -53,7 +46,7 @@ create function tonga_create_channel(
 )
 returns void as $$
 declare
-    _q_table text = _tonga_table(queue_name, 'tonga_q_');
+    _q_table text = _tonga_queue_table(queue_name);
     _q text;
 begin
     perform _tonga_validate_queue_name(queue_name);

@@ -1,3 +1,5 @@
+-- +goose up
+
 create extension if not exists ltree;
 create extension if not exists btree_gist;
 
@@ -19,6 +21,7 @@ create table tonga_channels (
 create index tonga_channels_topic_gist_idx on tonga_channels using gist (topic);
 create index tonga_channels_topic_delete_at_idx on tonga_channels (delete_at);
 
+-- +goose statementbegin
 create function _tonga_queue_table(queue_name text)
 returns text as $$
 begin
@@ -37,7 +40,9 @@ begin
   end if;
 end;
 $$ language plpgsql;
+-- +goose statementend
 
+-- +goose statementbegin
 create function tonga_create_channel(
     queue_name text,
     topic ltree,
@@ -92,7 +97,9 @@ begin
     on conflict do nothing;
 end;
 $$ language plpgsql;
+-- +goose statementend
 
+-- +goose statementbegin
 create function tonga_delete_channel(queue_name text)
 returns boolean as $$
 declare
@@ -109,7 +116,9 @@ begin
     return coalesce(_res, false);
 end
 $$ language plpgsql;
+-- +goose statementend
 
+-- +goose statementbegin
 create function tonga_send(topic ltree, body jsonb, deliver_at timestamptz = null)
 returns void as $$
 declare
@@ -128,7 +137,9 @@ begin
     end loop;
 end
 $$ language plpgsql;
+-- +goose statementend
 
+-- +goose statementbegin
 -- TODO return or error if deleted
 create function tonga_read(queue_name text, quantity int = 1, hide_for int = 30)
 returns setof tonga_message as $$
@@ -158,7 +169,9 @@ begin
     return query execute _q using tonga_read.quantity, make_interval(secs => tonga_read.hide_for);
 end
 $$ language plpgsql;
+-- +goose statementend
 
+-- +goose statementbegin
 create function tonga_delete(queue_name text, id bigint)
 returns boolean as $$
 declare
@@ -171,7 +184,9 @@ begin
     return coalesce(_res, false);
 end;
 $$ language plpgsql;
+-- +goose statementend
 
+-- +goose statementbegin
 create function tonga_gc()
 returns void as $$
 declare
@@ -186,3 +201,17 @@ begin
     end loop;
 end
 $$ language plpgsql;
+-- +goose statementend
+
+-- +goose down
+
+drop function tonga_create_channel;
+drop function tonga_delete_channel;
+drop function tonga_send
+drop function tonga_read;
+drop function tonga_delete;
+drop function tonga_gc;
+drop function _tonga_queue_table;
+drop function _tonga_validate_queue_name;
+drop table tonga_channels cascade;
+drop type tonga_message;

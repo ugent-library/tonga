@@ -1,4 +1,4 @@
-module github.com/ugentlib/tonga/tonga-go-pgx
+module github.com/ugentlib/tonga
 
 go 1.23.5
 

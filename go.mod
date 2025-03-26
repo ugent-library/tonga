@@ -1,4 +1,4 @@
-module github.com/ugentlib/tonga
+module github.com/ugent-library/tonga
 
 go 1.23.5
 

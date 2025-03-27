@@ -30,18 +30,18 @@ type ChannelOpts struct {
 
 func (c *Client) CreateChannel(ctx context.Context, queueName, topic string, opts ChannelOpts) error {
 	if opts.DeleteAt.IsZero() {
-		q := `select * from tonga_create_channel(queue_name => ?, topic => ?, unlogged => ?);`
+		q := `select * from tonga_create_channel(queue_name => $1, topic => $2, unlogged => $3);`
 		_, err := c.conn.Exec(ctx, q, queueName, topic, opts.Unlogged)
 		return err
 	} else {
-		q := `select * from tonga_create_channel(queue_name => ?, topic => ?, delete_at => ?, unlogged => ?);`
+		q := `select * from tonga_create_channel(queue_name => $1, topic => $2, delete_at => $3, unlogged => $4);`
 		_, err := c.conn.Exec(ctx, q, queueName, topic, opts.DeleteAt, opts.Unlogged)
 		return err
 	}
 }
 
 func (c *Client) DeleteChannel(ctx context.Context, queueName string) (bool, error) {
-	q := `select * from tonga_delete_channel(queue_name => ?);`
+	q := `select * from tonga_delete_channel(queue_name => $1);`
 	existed := false
 	err := c.conn.QueryRow(ctx, q, queueName).Scan(&existed)
 	return existed, err
@@ -57,11 +57,11 @@ func (c *Client) Send(ctx context.Context, topic string, body any, opts SendOpts
 		return err
 	}
 	if opts.DeliverAt.IsZero() {
-		q := `select * from tonga_send(topic => ?, body => ?);`
+		q := `select * from tonga_send(topic => $1, body => $2);`
 		_, err := c.conn.Exec(ctx, q, topic, b)
 		return err
 	} else {
-		q := `select * from tonga_send(topic => ?, body => ?, deliver_at => ?);`
+		q := `select * from tonga_send(topic => $1, body => $2, deliver_at => $3);`
 		_, err := c.conn.Exec(ctx, q, topic, b, opts.DeliverAt)
 		return err
 	}
@@ -76,8 +76,8 @@ type Message struct {
 }
 
 func (c *Client) Read(ctx context.Context, queueName string, quantity int, hideFor time.Duration) ([]*Message, error) {
-	q := `select * from tonga_read(queue_name => ?, quantity => ?, hide_for => ?);`
-	rows, err := c.conn.Query(ctx, q, quantity, hideFor.Seconds())
+	q := `select * from tonga_read(queue_name => $1, quantity => $2, hide_for => $3);`
+	rows, err := c.conn.Query(ctx, q, queueName, quantity, hideFor.Seconds())
 	if err != nil {
 		return nil, err
 	}
@@ -85,9 +85,9 @@ func (c *Client) Read(ctx context.Context, queueName string, quantity int, hideF
 }
 
 func (c *Client) Delete(ctx context.Context, queueName string, id int64) (bool, error) {
-	q := `select * from tonga_delete(queue_name => ?, id => ?);`
+	q := `select * from tonga_delete(queue_name => $1, id => $2);`
 	existed := false
-	err := c.conn.QueryRow(ctx, q, queueName).Scan(&existed)
+	err := c.conn.QueryRow(ctx, q, queueName, id).Scan(&existed)
 	return existed, err
 }
 

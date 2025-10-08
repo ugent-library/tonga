@@ -10,9 +10,103 @@ import (
 )
 
 type Conn interface {
-	Exec(ctx context.Context, sql string, arguments ...interface{}) (pgconn.CommandTag, error)
-	Query(ctx context.Context, sql string, optionsAndArgs ...interface{}) (pgx.Rows, error)
-	QueryRow(ctx context.Context, sql string, optionsAndArgs ...interface{}) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, optionsAndArgs ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, optionsAndArgs ...any) pgx.Row
+}
+
+type QueueOpts struct {
+	DeleteAt time.Time
+	Unlogged bool
+}
+
+type SendOpts struct {
+	DeliverAt time.Time
+}
+
+type Message struct {
+	ID        int64
+	Topic     string
+	Payload   json.RawMessage
+	CreatedAt time.Time
+	DeliverAt time.Time
+}
+
+func CreateQueue(ctx context.Context, conn Conn, name string, topics []string, opts QueueOpts) error {
+	if opts.DeleteAt.IsZero() {
+		q := `SELECT * FROM tonga_create_queue(name => $1, topics => $2, unlogged => $3);`
+		_, err := conn.Exec(ctx, q, name, topics, opts.Unlogged)
+		return err
+	} else {
+		q := `SELECT * FROM tonga_create_queue(name => $1, topics => $2, delete_at => $3, unlogged => $4);`
+		_, err := conn.Exec(ctx, q, name, topics, opts.DeleteAt, opts.Unlogged)
+		return err
+	}
+}
+
+func DeleteQueue(ctx context.Context, conn Conn, name string) (bool, error) {
+	q := `SELECT * FROM tonga_delete_queue(name => $1);`
+	existed := false
+	err := conn.QueryRow(ctx, q, name).Scan(&existed)
+	return existed, err
+}
+
+func Send(ctx context.Context, conn Conn, topic string, payload any, opts SendOpts) error {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if opts.DeliverAt.IsZero() {
+		q := `SELECT * FROM tonga_send(topic => $1, payload => $2);`
+		_, err := conn.Exec(ctx, q, topic, b)
+		return err
+	} else {
+		q := `SELECT * FROM tonga_send(topic => $1, payload => $2, deliver_at => $3);`
+		_, err := conn.Exec(ctx, q, topic, b, opts.DeliverAt)
+		return err
+	}
+}
+
+func Read(ctx context.Context, conn Conn, queue string, quantity int, hideFor time.Duration) ([]Message, error) {
+	q := `SELECT * FROM tonga_read(queue => $1, quantity => $2, hide_for => $3);`
+	rows, err := conn.Query(ctx, q, queue, quantity, hideFor.Seconds())
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByPos[Message])
+}
+
+func Delete(ctx context.Context, conn Conn, queue string, id int64) (bool, error) {
+	q := `SELECT * FROM tonga_delete(queue => $1, id => $2);`
+	existed := false
+	err := conn.QueryRow(ctx, q, queue, id).Scan(&existed)
+	return existed, err
+}
+
+func GC(ctx context.Context, conn Conn) error {
+	q := `SELECT * FROM tonga_gc();`
+	_, err := conn.Exec(ctx, q)
+	return err
+}
+
+func EnqueueSend(batch *pgx.Batch, topic string, payload any, opts SendOpts) error {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if opts.DeliverAt.IsZero() {
+		batch.Queue(
+			`SELECT * FROM tonga_send(topic => $1, payload => $2);`,
+			topic, b,
+		)
+	} else {
+		batch.Queue(
+			`SELECT * FROM tonga_send(topic => $1, payload => $2, deliver_at => $3);`,
+			topic, b, opts.DeliverAt,
+		)
+	}
+
+	return nil
 }
 
 type Client struct {
@@ -23,76 +117,26 @@ func New(conn Conn) *Client {
 	return &Client{conn: conn}
 }
 
-type ChannelOpts struct {
-	DeleteAt time.Time
-	Unlogged bool
+func (c *Client) CreateQueue(ctx context.Context, name string, topics []string, opts QueueOpts) error {
+	return CreateQueue(ctx, c.conn, name, topics, opts)
 }
 
-func (c *Client) CreateChannel(ctx context.Context, queueName, topic string, opts ChannelOpts) error {
-	if opts.DeleteAt.IsZero() {
-		q := `select * from tonga_create_channel(queue_name => $1, topic => $2, unlogged => $3);`
-		_, err := c.conn.Exec(ctx, q, queueName, topic, opts.Unlogged)
-		return err
-	} else {
-		q := `select * from tonga_create_channel(queue_name => $1, topic => $2, delete_at => $3, unlogged => $4);`
-		_, err := c.conn.Exec(ctx, q, queueName, topic, opts.DeleteAt, opts.Unlogged)
-		return err
-	}
+func (c *Client) DeleteQueue(ctx context.Context, name string) (bool, error) {
+	return DeleteQueue(ctx, c.conn, name)
 }
 
-func (c *Client) DeleteChannel(ctx context.Context, queueName string) (bool, error) {
-	q := `select * from tonga_delete_channel(queue_name => $1);`
-	existed := false
-	err := c.conn.QueryRow(ctx, q, queueName).Scan(&existed)
-	return existed, err
+func (c *Client) Send(ctx context.Context, topic string, payload any, opts SendOpts) error {
+	return Send(ctx, c.conn, topic, payload, opts)
 }
 
-type SendOpts struct {
-	DeliverAt time.Time
+func (c *Client) Read(ctx context.Context, queue string, quantity int, hideFor time.Duration) ([]Message, error) {
+	return Read(ctx, c.conn, queue, quantity, hideFor)
 }
 
-func (c *Client) Send(ctx context.Context, topic string, body any, opts SendOpts) error {
-	b, err := json.Marshal(body)
-	if err != nil {
-		return err
-	}
-	if opts.DeliverAt.IsZero() {
-		q := `select * from tonga_send(topic => $1, body => $2);`
-		_, err := c.conn.Exec(ctx, q, topic, b)
-		return err
-	} else {
-		q := `select * from tonga_send(topic => $1, body => $2, deliver_at => $3);`
-		_, err := c.conn.Exec(ctx, q, topic, b, opts.DeliverAt)
-		return err
-	}
-}
-
-type Message struct {
-	ID        int64
-	Topic     string
-	Body      json.RawMessage
-	CreatedAt time.Time
-	DeliverAt time.Time
-}
-
-func (c *Client) Read(ctx context.Context, queueName string, quantity int, hideFor time.Duration) ([]*Message, error) {
-	q := `select * from tonga_read(queue_name => $1, quantity => $2, hide_for => $3);`
-	rows, err := c.conn.Query(ctx, q, queueName, quantity, hideFor.Seconds())
-	if err != nil {
-		return nil, err
-	}
-	return pgx.CollectRows(rows, pgx.RowToAddrOfStructByPos[Message])
-}
-
-func (c *Client) Delete(ctx context.Context, queueName string, id int64) (bool, error) {
-	q := `select * from tonga_delete(queue_name => $1, id => $2);`
-	existed := false
-	err := c.conn.QueryRow(ctx, q, queueName, id).Scan(&existed)
-	return existed, err
+func (c *Client) Delete(ctx context.Context, queue string, id int64) (bool, error) {
+	return Delete(ctx, c.conn, queue, id)
 }
 
 func (c *Client) GC(ctx context.Context) error {
-	q := `select * from tonga_gc();`
-	_, err := c.conn.Exec(ctx, q)
-	return err
+	return GC(ctx, c.conn)
 }

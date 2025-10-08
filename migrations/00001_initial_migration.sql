@@ -1,217 +1,219 @@
+-- SQL code is mostly taken or adapted from PGMQ https://github.com/pgmq/pgmq/blob/main/pgmq-extension/sql/pgmq.sql 
+
 -- +goose up
 
-create extension if not exists ltree;
-create extension if not exists btree_gist;
-
-create type tonga_message as (
+CREATE TYPE tonga_message AS (
     id bigint,
-    topic ltree,
-    body jsonb,
+    topic text,
+    payload jsonb,
     created_at timestamptz,
     deliver_at timestamptz
 );
 
-create table tonga_channels (
-    queue_name text unique not null,
-    topic ltree not null,
-    unlogged boolean not null,
+CREATE TABLE tonga_queues (
+    name text UNIQUE NOT NULL,
+    topics text[] NOT NULL,
+    unlogged boolean NOT null,
     delete_at timestamptz
 );
 
-create index tonga_channels_topic_gist_idx on tonga_channels using gist (topic);
-create index tonga_channels_topic_delete_at_idx on tonga_channels (delete_at);
+CREATE INDEX tonga_queues_topics_idx ON tonga_queues USING gin (topics);
+CREATE INDEX tonga_queues_delete_at_idx ON tonga_queues (delete_at);
 
 -- +goose statementbegin
-create function _tonga_queue_table(queue_name text)
-returns text as $$
-begin
-    if queue_name ~ '\$|;|--|''' then
-        raise exception 'tonga: queue name contains invalid characters $, ;, --, or \''';
-    end if;
-    return 'tonga_q_' || lower(queue_name);
-end;
-$$ language plpgsql;
-
-create function _tonga_validate_queue_name(queue_name text)
-returns void as $$
-begin
-  if length(queue_name) >= 48 then
-    raise exception 'tonga: queue name is too long, maximum length is 48 characters';
-  end if;
-end;
-$$ language plpgsql;
+CREATE FUNCTION _tonga_acquire_queue_lock(name text) 
+RETURNS void AS $$
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtext(_tonga_queue_table(name)));
+END;
+$$ LANGUAGE plpgsql;
 -- +goose statementend
 
 -- +goose statementbegin
-create function tonga_create_channel(
-    queue_name text,
-    topic ltree,
+CREATE FUNCTION _tonga_queue_table(name text)
+RETURNS text AS $$
+BEGIN
+    IF name !~ '^[a-z0-9_]+$' THEN
+        RAISE EXCEPTION 'tonga: queue name can only contain characters: a-z, 0-9 or _';
+    END IF;
+    IF length(name) >= 55 THEN
+        raise exception 'tonga: queue name is too long, maximum length is 55';
+    END IF;
+    RETURN 'tonga_q_' || lower(name);
+END;
+$$ LANGUAGE plpgsql;
+-- +goose statementend
+
+-- +goose statementbegin
+CREATE FUNCTION tonga_create_queue(
+    name text,
+    topics text[],
     delete_at timestamptz = null,
     unlogged boolean = false
 )
-returns void as $$
-declare
-    _q_table text = _tonga_queue_table(queue_name);
-    _q text;
-begin
-    perform _tonga_validate_queue_name(queue_name);
+RETURNS void AS $$
+DECLARE
+    _q_table text = _tonga_queue_table(tonga_create_queue.name);
+BEGIN
+    PERFORM _tonga_acquire_queue_lock(tonga_create_queue.name);
 
-    if unlogged then
-        execute format(
+    IF unlogged THEN
+        EXECUTE format(
             $QUERY$
-            create unlogged table if not exists %I (
-                id bigint primary key generated always as identity,
-                topic ltree not null,
-                body jsonb not null,
-                created_at timestamptz not null default now(),
-                deliver_at timestamptz not null default now()
+            CREATE UNLOGGED TABLE IF NOT EXISTS %I (
+                id bigint PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+                topic text NOT NULL,
+                payload jsonb NOT NULL,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                deliver_at timestamptz NOT NULL DEFAULT now()
             )
             $QUERY$,
             _q_table
         );
-    else
-        execute format(
+    ELSE
+        EXECUTE format(
             $QUERY$
-            create table if not exists %I (
-                id bigint primary key generated always as identity,
-                topic ltree not null,
-                body jsonb not null,
-                created_at timestamptz not null default now(),
-                deliver_at timestamptz not null default now()
+            CREATE TABLE IF NOT EXISTS %I (
+                id bigint PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+                topic text NOT NULL,
+                payload jsonb NOT NULL,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                deliver_at timestamptz NOT NULL DEFAULT now()
             )
             $QUERY$,
             _q_table
         );
-    end if;    
+    END IF;    
 
-    execute format('create index if not exists %I on %I (deliver_at);', _q_table || '_deliver_at_idx', _q_table);
+    EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I (deliver_at);', _q_table || '_deliver_at_idx', _q_table);
 
     -- TODO should check topic and delete_at is same
-    insert into tonga_channels (queue_name, topic, unlogged, delete_at)
-    values (
-        tonga_create_channel.queue_name,
-        tonga_create_channel.topic,
-        tonga_create_channel.unlogged,
-        tonga_create_channel.delete_at
+    INSERT INTO tonga_queues (name, topics, unlogged, delete_at)
+    VALUES (
+        tonga_create_queue.name,
+        tonga_create_queue.topics,
+        tonga_create_queue.unlogged,
+        tonga_create_queue.delete_at
     )
-    on conflict do nothing;
-end;
-$$ language plpgsql;
+    ON CONFLICT DO NOTHING;
+END;
+$$ LANGUAGE plpgsql;
 -- +goose statementend
 
 -- +goose statementbegin
-create function tonga_delete_channel(queue_name text)
-returns boolean as $$
-declare
-    _q_table text = _tonga_queue_table(queue_name);
+CREATE FUNCTION tonga_delete_queue(name text)
+RETURNS boolean AS $$
+DECLARE
+    _q_table text = _tonga_queue_table(tonga_delete_queue.name);
     _res boolean;
-begin
-    execute format('drop table if exists %I;', _q_table);
+BEGIN
+    PERFORM _tonga_acquire_queue_lock(tonga_delete_queue.name);
 
-    delete from tonga_channels c
-    where c.queue_name = tonga_delete_channel.queue_name
-    returning true
-    into _res;
+    EXECUTE format('drop table if exists %I;', _q_table);
+
+    DELETE FROM tonga_queues q
+    WHERE q.name = tonga_delete_queue.name
+    RETURNING true
+    INTO _res;
     
-    return coalesce(_res, false);
+    RETURN coalesce(_res, false);
 end
-$$ language plpgsql;
+$$ LANGUAGE plpgsql;
 -- +goose statementend
 
 -- +goose statementbegin
-create function tonga_send(topic ltree, body jsonb, deliver_at timestamptz = null)
-returns void as $$
-declare
+CREATE FUNCTION tonga_send(topic text, payload jsonb, deliver_at timestamptz = null)
+RETURNS void AS $$
+DECLARE
     _deliver_at timestamptz = coalesce(tonga_send.deliver_at, now());
     _rec record;
-    _q text;
-begin
-    for _rec in 
-        select c.queue_name
-        from tonga_channels c
-        where c.topic @> tonga_send.topic and (c.delete_at is null or c.delete_at > now())
-    loop
-        _q = _tonga_queue_table(_rec.queue_name);
-        execute format('insert into %I (topic, body, deliver_at) values ($1, $2, $3);', _q)
-        using tonga_send.topic, tonga_send.body, _deliver_at;
-    end loop;
-end
-$$ language plpgsql;
+    _q_table text;
+BEGIN
+    FOR _rec IN 
+        SELECT q.name
+        FROM tonga_queues q
+        WHERE tonga_send.topic = any(q.topics) AND (q.delete_at IS NULL OR q.delete_at > now())
+    LOOP
+        _q_table = _tonga_queue_table(_rec.name);
+        EXECUTE format('insert into %I (topic, payload, deliver_at) values ($1, $2, $3);', _q_table)
+        USING tonga_send.topic, tonga_send.payload, _deliver_at;
+    END LOOP;
+END
+$$ LANGUAGE plpgsql;
 -- +goose statementend
 
 -- +goose statementbegin
 -- TODO return or error if deleted
-create function tonga_read(queue_name text, quantity int = 1, hide_for int = 30)
-returns setof tonga_message as $$
-declare
-    _q_table text = _tonga_queue_table(queue_name);
+CREATE FUNCTION tonga_read(queue text, quantity int = 1, hide_for int = 10)
+RETURNS SETOF tonga_message as $$
+DECLARE
+    _q_table text = _tonga_queue_table(queue);
     _q text;
-begin
+BEGIN
     _q = format(
         $QUERY$
-        with msgs as (
-			select id
-			from %I
-			where deliver_at <= clock_timestamp()
-			order by id asc
-			limit $1
-			for update skip locked
+        WITH msgs AS (
+			SELECT id
+			FROM %I
+			WHERE deliver_at <= clock_timestamp()
+			ORDER BY id ASC
+			LIMIT $1
+			FOR UPDATE SKIP LOCKED
 		)
-		update %I m
-		set deliver_at = clock_timestamp() + $2
-		from msgs
-		where m.id = msgs.id
-		returning m.id, m.topic, m.body, m.created_at, m.deliver_at;
+		UPDATE %I m
+		SET deliver_at = clock_timestamp() + $2
+		FROM msgs
+		WHERE m.id = msgs.id
+		RETURNING m.id, m.topic, m.payload, m.created_at, m.deliver_at;
         $QUERY$,
-        _q_table,
-        _q_table
+        _q_table, _q_table
     );
-    return query execute _q using tonga_read.quantity, make_interval(secs => tonga_read.hide_for);
+    RETURN QUERY EXECUTE _q USING tonga_read.quantity, make_interval(secs => tonga_read.hide_for);
 end
-$$ language plpgsql;
+$$ LANGUAGE plpgsql;
 -- +goose statementend
 
 -- +goose statementbegin
-create function tonga_delete(queue_name text, id bigint)
-returns boolean as $$
-declare
-    _q_table text = _tonga_queue_table(queue_name);
+CREATE FUNCTION tonga_delete(queue text, id bigint)
+RETURNS boolean AS $$
+DECLARE
+    _q_table text = _tonga_queue_table(queue);
     _res boolean;
-begin
-    execute format('delete from %I where id = $1 returning true;', _q_table)
-    using tonga_delete.id
-    into _res;
+BEGIN
+    EXECUTE format('delete from %I where id = $1 returning true;', _q_table)
+    USING tonga_delete.id
+    INTO _res;
     return coalesce(_res, false);
-end;
-$$ language plpgsql;
+END;
+$$ LANGUAGE plpgsql;
 -- +goose statementend
 
 -- +goose statementbegin
-create function tonga_gc()
-returns void as $$
-declare
+CREATE FUNCTION tonga_gc()
+RETURNS void AS $$
+DECLARE
     _rec record;
-begin
-    for _rec in 
-        delete from tonga_channels
-		where delete_at is not null and delete_at <= now()
-        returning queue_name
-    loop
-        execute format('drop table %I;', _tonga_queue_table(_rec.queue_name));
-    end loop;
-end
-$$ language plpgsql;
+BEGIN
+    FOR _rec IN 
+        DELETE FROM tonga_queues
+		WHERE delete_at IS NOT NULL AND delete_at <= now()
+        RETURNING name
+    LOOP
+        PERFORM _tonga_acquire_queue_lock(_rec.name);
+        EXECUTE format('drop table %I;', _tonga_queue_table(_rec.name));
+    END LOOP;
+END
+$$ LANGUAGE plpgsql;
 -- +goose statementend
 
 -- +goose down
 
-drop function tonga_create_channel;
-drop function tonga_delete_channel;
-drop function tonga_send
-drop function tonga_read;
-drop function tonga_delete;
-drop function tonga_gc;
-drop function _tonga_queue_table;
-drop function _tonga_validate_queue_name;
-drop table tonga_channels cascade;
-drop type tonga_message;
+DROP FUNCTION tonga_create_queue;
+DROP FUNCTION tonga_delete_queue;
+DROP FUNCTION tonga_send;
+DROP FUNCTION tonga_read;
+DROP FUNCTION tonga_delete;
+DROP FUNCTION tonga_gc;
+DROP FUNCTION _tonga_queue_table;
+DROP TABLE tonga_queues CASCADE;
+DROP TYPE tonga_message;
